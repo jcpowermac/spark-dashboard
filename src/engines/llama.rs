@@ -300,6 +300,21 @@ impl LlamaAdapter {
         }
     }
 
+    /// `/metrics` URL, optionally pinned to a model. Multi-model preset
+    /// pools (`--models-preset`) reject a bare scrape with 400 "model name
+    /// is missing from the request"; a single-model server accepts
+    /// `?model=` harmlessly, so the retry is safe in either case.
+    fn metrics_url(&self, model: Option<&str>) -> String {
+        let bare = format!("{}/metrics", self.endpoint);
+        let Ok(mut url) = reqwest::Url::parse(&bare) else {
+            return bare;
+        };
+        if let Some(model) = model {
+            url.query_pairs_mut().append_pair("model", model);
+        }
+        url.to_string()
+    }
+
     fn auth(&self, rb: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
         match &self.api_key {
             Some(key) => rb.bearer_auth(key),
@@ -445,20 +460,45 @@ impl EngineAdapter for LlamaAdapter {
         let res = self
             .auth(
                 self.client
-                    .get(format!("{}/metrics", self.endpoint))
+                    .get(self.metrics_url(None))
                     .timeout(Duration::from_secs(5)),
             )
             .send()
             .await
             .ok()?;
-        if !res.status().is_success() {
-            tracing::debug!(
-                endpoint = %self.endpoint,
-                status = %res.status(),
-                "/metrics unavailable (server started without `--metrics`?)",
-            );
-            return None;
-        }
+        let res = if res.status().is_success() {
+            res
+        } else {
+            // A multi-model preset pool needs the model name on the scrape.
+            // Its own `/v1/models` id wins over the command-line hint.
+            let model = self
+                .models_reply()
+                .await
+                .ok()
+                .or_else(|| self.model_hint.clone());
+            let retry = match model {
+                Some(model) => self
+                    .auth(
+                        self.client
+                            .get(self.metrics_url(Some(&model)))
+                            .timeout(Duration::from_secs(5)),
+                    )
+                    .send()
+                    .await
+                    .ok()?,
+                None => return None,
+            };
+            if retry.status().is_success() {
+                retry
+            } else {
+                tracing::debug!(
+                    endpoint = %self.endpoint,
+                    status = %retry.status(),
+                    "/metrics unavailable (server started without `--metrics`?)",
+                );
+                return None;
+            }
+        };
         let body = res.text().await.ok()?;
 
         let parsed = parse_prometheus_text(&body)?;
@@ -769,6 +809,27 @@ llamacpp:tokens_predicted_total 0
         );
         // Plain slugs and aliases pass through.
         assert_eq!(display_model_hint("my-alias"), "my-alias");
+    }
+
+    #[test]
+    fn metrics_url_pins_the_model_for_preset_pools() {
+        let adapter = LlamaAdapter::new(
+            reqwest::Client::new(),
+            "http://localhost:9931".into(),
+            None,
+            None,
+        );
+        assert_eq!(adapter.metrics_url(None), "http://localhost:9931/metrics");
+        assert_eq!(
+            adapter.metrics_url(Some("Qwen3.8-27B-UD-Q4_K_M")),
+            "http://localhost:9931/metrics?model=Qwen3.8-27B-UD-Q4_K_M",
+        );
+        // Alias names with spaces must arrive URL-encoded (+ decodes to a
+        // space server-side, like any standard query form encoding).
+        assert_eq!(
+            adapter.metrics_url(Some("my model v2")),
+            "http://localhost:9931/metrics?model=my+model+v2",
+        );
     }
 
     #[test]
