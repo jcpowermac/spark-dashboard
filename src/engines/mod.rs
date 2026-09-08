@@ -600,8 +600,16 @@ pub async fn engine_collector_loop(
     loop {
         tokio::select! {
             _ = detection_interval.tick() => {
-                // Refresh process list for scanning
-                sys.refresh_processes(sysinfo::ProcessesToUpdate::All, true);
+                // Refresh process list for scanning. `refresh_processes()`
+                // alone never fills `cmd()` — sysinfo 0.39's convenience
+                // refresh kind has no `.with_cmd()`, and the process scan
+                // silently skips every process with an empty command line,
+                // so detection would find nothing. Request cmdline explicitly.
+                sys.refresh_processes_specifics(
+                    sysinfo::ProcessesToUpdate::All,
+                    true,
+                    sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::Always),
+                );
 
                 let detected = detector::detect_engines(&sys, &client).await;
 
@@ -719,6 +727,41 @@ pub async fn engine_collector_loop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: the engine loop scans `cmd()` for engine binaries, so the
+    /// refresh it performs must populate it. sysinfo's convenience
+    /// `refresh_processes()` dropped `.with_cmd()` from its default refresh
+    /// kind, which made every process look command-line-less and detection
+    /// find nothing ("No inference engine running").
+    #[test]
+    fn engine_scan_refresh_populates_cmdline() {
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn sleep");
+        let pid = child.id();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        let mut sys = sysinfo::System::new();
+        sys.refresh_processes_specifics(
+            sysinfo::ProcessesToUpdate::All,
+            true,
+            sysinfo::ProcessRefreshKind::nothing().with_cmd(sysinfo::UpdateKind::Always),
+        );
+
+        let proc = sys
+            .processes()
+            .values()
+            .find(|p| p.pid().as_u32() == pid)
+            .expect("sleep process visible to sysinfo");
+        let cmd = proc.cmd();
+        assert!(
+            !cmd.is_empty() && cmd[0].to_string_lossy().ends_with("sleep"),
+            "engine scan refresh must fill cmd(), got {cmd:?}"
+        );
+        let _ = child.kill();
+        let _ = child.wait();
+    }
 
     /// Minimal adapter so `EngineState` can be constructed in tests. None of
     /// these are exercised — the cache logic under test is pure.
