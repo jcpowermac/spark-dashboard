@@ -81,7 +81,10 @@ export interface NetworkMetrics {
 
 // --- LLM Engine Types (Phase 2) ---
 
-export type EngineType = 'Vllm'
+/** The inference engine provider. `Vllm` is vLLM; `Llama` is llama.cpp's
+ * OpenAI-compatible `llama-server`. Mirrors the Rust `engines::EngineType`
+ * enum — keep the two in lockstep. */
+export type EngineType = 'Vllm' | 'Llama'
 
 export type DeploymentMode = 'Docker' | 'Native'
 
@@ -180,9 +183,10 @@ export interface EngineMetrics {
   tpot_buckets: HistogramBucket[] | null
 
   // --- Speculative decoding ---
-  // Populated only when the served model has speculative decoding configured
-  // (vLLM emits `vllm:spec_decode_*` only then). When all are null the UI hides
-  // the speculative-decoding section entirely.
+  // Populated only when the served model has speculative decoding configured —
+  // each engine emits its spec-decoding counters only then (vLLM: `vllm:spec_decode_*`,
+  // llama.cpp: `llamacpp:spec_decode_*`). When all are null the UI hides the
+  // speculative-decoding section entirely.
   /** Cumulative speculatively-generated (draft) tokens. Counts up over the engine's life. */
   spec_decode_draft_tokens_total: number | null
   /** Cumulative draft tokens that passed verification. Counts up. */

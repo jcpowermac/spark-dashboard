@@ -113,7 +113,7 @@ struct RunArgs {
     #[arg(long, env = "SPARK_DASHBOARD_SIMULATE_GPUS", default_value_t = 0)]
     simulate_gpus: u32,
 
-    /// Manually specify engine type (use with --engine-url)
+    /// Manually specify engine type (vllm or llama.cpp; use with --engine-url)
     #[arg(
         long,
         value_name = "TYPE",
@@ -185,6 +185,16 @@ fn main() -> ExitCode {
     }
 }
 
+/// Map a `--engine`/`SPARK_DASHBOARD_ENGINE` value to its engine type.
+/// Unknown values return `None` so the caller can log and skip them.
+fn parse_engine_type(engine_str: &str) -> Option<EngineType> {
+    match engine_str.to_lowercase().as_str() {
+        "vllm" => Some(EngineType::Vllm),
+        "llama" | "llama.cpp" | "llamacpp" | "llama-server" => Some(EngineType::Llama),
+        _ => None,
+    }
+}
+
 fn run_server(args: RunArgs) -> Result<(), Box<dyn std::error::Error>> {
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -213,10 +223,10 @@ async fn run_server_inner(args: RunArgs) -> Result<(), Box<dyn std::error::Error
         .iter()
         .zip(args.engine_url.iter())
         .filter_map(|(engine_str, url)| {
-            let engine_type = match engine_str.to_lowercase().as_str() {
-                "vllm" => EngineType::Vllm,
-                unknown => {
-                    tracing::warn!("Unknown engine type '{}', ignoring override", unknown);
+            let engine_type = match parse_engine_type(engine_str) {
+                Some(engine_type) => engine_type,
+                None => {
+                    tracing::warn!("Unknown engine type '{}', ignoring override", engine_str);
                     return None;
                 }
             };
@@ -407,6 +417,19 @@ mod tests {
             let args = parse(&["--state-dir", "/tmp/override"]);
             assert_eq!(args.state_dir, "/tmp/override");
         });
+    }
+
+    #[test]
+    fn engine_type_values_parse_case_insensitively() {
+        assert_eq!(parse_engine_type("vllm"), Some(EngineType::Vllm));
+        assert_eq!(parse_engine_type("VLLM"), Some(EngineType::Vllm));
+        assert_eq!(parse_engine_type("llama"), Some(EngineType::Llama));
+        assert_eq!(parse_engine_type("llama.cpp"), Some(EngineType::Llama));
+        assert_eq!(parse_engine_type("Llama.cpp"), Some(EngineType::Llama));
+        assert_eq!(parse_engine_type("llama-server"), Some(EngineType::Llama));
+        // Everything else is ignored with a warning, not a crash.
+        assert_eq!(parse_engine_type("ollama"), None);
+        assert_eq!(parse_engine_type(""), None);
     }
 
     #[test]

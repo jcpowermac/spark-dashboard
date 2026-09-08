@@ -6,6 +6,8 @@ import {
   formatAcceptanceLength,
   formatEndpoint,
   engineDescription,
+  engineDisplayName,
+  engineTypeIcon,
   modelMetadataWarning,
 } from '../lib/format'
 
@@ -110,6 +112,26 @@ describe('engineDescription', () => {
     expect(engineDescription({ engine_type: 'Vllm', endpoint: 'http://localhost:8001' })).toBe(
       'vLLM localhost:8001',
     )
+  })
+
+  it('names a llama.cpp engine the way the backend spells it', () => {
+    expect(
+      engineDescription({ engine_type: 'Llama', endpoint: 'http://localhost:8080' }),
+    ).toBe('llama.cpp localhost:8080')
+  })
+})
+
+describe('engineDisplayName', () => {
+  it('maps both engine types', () => {
+    expect(engineDisplayName('Vllm')).toBe('vLLM')
+    expect(engineDisplayName('Llama')).toBe('llama.cpp')
+  })
+})
+
+describe('engineTypeIcon', () => {
+  it('maps each engine type to its own mark', () => {
+    expect(engineTypeIcon('Vllm')).toBe('/icons/vllm.svg')
+    expect(engineTypeIcon('Llama')).toBe('/icons/llamacpp.svg')
   })
 })
 

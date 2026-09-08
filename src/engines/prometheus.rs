@@ -17,13 +17,21 @@ pub struct ParsedMetrics {
 /// compute rates (delta / elapsed). Histogram `_sum` and `_count` suffixed
 /// samples are stored in counters for average computation (e.g. avg TTFT =
 /// sum / count). Untyped samples are treated as gauges.
+/// Normalize colon-prefixed metric names to underscore form.
+///
+/// Both supported engines expose metrics with a colon prefix — vLLM uses
+/// `vllm:` (e.g. `vllm:kv_cache_usage_perc`) and llama.cpp uses `llamacpp:`
+/// (e.g. `llamacpp:prompt_tokens_total`) — and colons are reserved for
+/// Prometheus recording rules, so prometheus-parse silently drops such
+/// lines. The replacement covers both metric lines and # TYPE/# HELP lines,
+/// so samples still match their type declarations.
+fn normalize_metric_prefixes(body: &str) -> String {
+    body.replace("vllm:", "vllm_")
+        .replace("llamacpp:", "llamacpp_")
+}
+
 pub fn parse_prometheus_text(body: &str) -> Option<ParsedMetrics> {
-    // Normalize colons in metric name prefixes to underscores. vLLM uses colons
-    // (e.g. "vllm:kv_cache_usage_perc") which are reserved for Prometheus recording
-    // rules and get silently dropped by prometheus-parse. Replace in both metric
-    // lines and # TYPE/# HELP lines so the parser can match samples to their type
-    // declarations.
-    let normalized = body.replace("vllm:", "vllm_");
+    let normalized = normalize_metric_prefixes(body);
 
     let reader = std::io::BufReader::new(normalized.as_bytes());
     let scrape = prometheus_parse::Scrape::parse(reader.lines()).ok()?;
@@ -160,6 +168,56 @@ vllm:time_to_first_token_seconds_count 100.0
         assert_eq!(buckets[2], (1.0, 90.0));
         assert!(buckets[3].0.is_infinite() && buckets[3].0 > 0.0);
         assert_eq!(buckets[3].1, 100.0);
+    }
+
+    /// llama.cpp (llama-server, started with `--metrics`) exposes its
+    /// telemetry under the reserved `llamacpp:` prefix: counters for the
+    /// cumulative totals and the spec-decoding tallies, gauges for the
+    /// in-flight request/slot state and the engine's own windowed throughput
+    /// averages. No histograms exist, so nothing may land in `histograms`.
+    #[test]
+    fn captures_llama_cpp_counters_and_gauges() {
+        let body = "\
+# HELP llamacpp:prompt_tokens_total Total prompt processing tokens (excluding cached tokens).
+# TYPE llamacpp:prompt_tokens_total counter
+llamacpp:prompt_tokens_total 12345
+# HELP llamacpp:tokens_predicted_total Total predicted tokens.
+# TYPE llamacpp:tokens_predicted_total counter
+llamacpp:tokens_predicted_total 987
+# HELP llamacpp:predicted_tokens_seconds Average generation throughput between two scrapes.
+# TYPE llamacpp:predicted_tokens_seconds gauge
+llamacpp:predicted_tokens_seconds 25
+# HELP llamacpp:requests_processing Total active requests.
+# TYPE llamacpp:requests_processing gauge
+llamacpp:requests_processing 3
+# HELP llamacpp:spec_decode_num_draft_tokens_total Total speculative draft tokens generated.
+# TYPE llamacpp:spec_decode_num_draft_tokens_total counter
+llamacpp:spec_decode_num_draft_tokens_total 1000
+";
+        let parsed = parse_prometheus_text(body).expect("parse");
+        assert_eq!(
+            parsed.counters.get("llamacpp_prompt_tokens_total"),
+            Some(&12345.0)
+        );
+        assert_eq!(
+            parsed.counters.get("llamacpp_tokens_predicted_total"),
+            Some(&987.0)
+        );
+        assert_eq!(
+            parsed
+                .counters
+                .get("llamacpp_spec_decode_num_draft_tokens_total"),
+            Some(&1000.0)
+        );
+        assert_eq!(
+            parsed.gauges.get("llamacpp_predicted_tokens_seconds"),
+            Some(&25.0)
+        );
+        assert_eq!(
+            parsed.gauges.get("llamacpp_requests_processing"),
+            Some(&3.0)
+        );
+        assert!(parsed.histograms.is_empty());
     }
 
     #[test]

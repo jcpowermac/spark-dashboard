@@ -4,7 +4,8 @@ Real-time hardware and LLM inference monitoring for Linux systems with NVIDIA
 GPUs. Developed and tested on the NVIDIA DGX Spark, but works on any Linux
 host with NVIDIA drivers — discrete-GPU workstations, DGX boxes, cloud VMs.
 A Rust backend collects GPU, CPU, memory, disk, and network metrics alongside
-vLLM engine statistics and streams them over WebSocket to a React frontend.
+inference engine statistics (vLLM and llama.cpp) and streams them over
+WebSocket to a React frontend.
 
 ![Stack](https://img.shields.io/badge/Rust-Axum-orange) ![Stack](https://img.shields.io/badge/React_19-TypeScript-blue) ![Stack](https://img.shields.io/badge/Tailwind_CSS_4-06B6D4) ![Stack](https://img.shields.io/badge/Vite_8-646CFF) ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -79,17 +80,22 @@ for details on what each script does.
   (e.g. DGX Spark GB10, GH200)
 - Disk and network I/O throughput
 
-**LLM Engine Monitoring** (vLLM via Prometheus metrics)
+**LLM Engine Monitoring** (vLLM and llama.cpp via Prometheus metrics)
 - Tokens per second (generation + prompt)
 - Time to first token, inter-token latency, end-to-end latency, queue time
 - Active/queued requests, batch size
 - KV cache utilization, prefix cache hit rate
 - Automatic engine discovery via process scan and Docker API
 - SLO Goodput
+- llama.cpp's `llama-server` is detected the same way and reports the fields
+  its `/metrics` endpoint exposes (throughput, request/slot state, prompt
+  cache, speculative decoding); per-request latency histograms have no
+  llama.cpp equivalent and read as empty. llama-server must be started with
+  `--metrics` — without it the engine is listed but its metrics read empty
 
 **Multi-Engine Support**
 - Run and monitor any number of inference engines side by side — each
-  vLLM process or container is detected automatically
+  vLLM or llama-server process or container is detected automatically
 - Every engine panel follows the page's engine selection by default, so one
   layout works whether the host runs one engine or four
 - Pin a panel to a specific engine to watch two of them at once; a pinned
@@ -275,7 +281,7 @@ spark-dashboard service status
       --state-dir <DIR>       Directory for saved state [default: /var/lib/spark-dashboard] [env: SPARK_DASHBOARD_STATE_DIR]
       --gpu-index <IDX>       Optional NVML GPU index to monitor [env: SPARK_DASHBOARD_GPU_INDEX]
       --simulate-gpus <N>     Append N fictive GPUs with simulated data (dev aid) [env: SPARK_DASHBOARD_SIMULATE_GPUS]
-      --engine <TYPE>         Manual engine type (e.g. vllm) [env: SPARK_DASHBOARD_ENGINE]
+      --engine <TYPE>         Manual engine type (vllm or llama.cpp) [env: SPARK_DASHBOARD_ENGINE]
       --engine-url <URL>      Manual engine endpoint (requires --engine) [env: SPARK_DASHBOARD_ENGINE_URL]
       --engine-api-key <KEY>  API key for an endpoint, paired by index with --engine-url [env: SPARK_DASHBOARD_ENGINE_API_KEY]
       --provider-api-key <KEY> Fallback API key for any endpoint [env: SPARK_DASHBOARD_PROVIDER_API_KEY]
@@ -559,6 +565,7 @@ real NVML/procfs parsing on Linux, with compile-time stubs on other platforms.
 │       ├── mod.rs              Engine trait, state machine, collector
 │       ├── detector.rs         Process scan + Docker discovery
 │       ├── vllm.rs             vLLM adapter (Prometheus parsing)
+│       ├── llama.rs            llama.cpp (llama-server) adapter
 │       └── prometheus.rs       Prometheus text-format parser
 ├── frontend/
 │   └── src/

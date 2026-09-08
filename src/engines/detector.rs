@@ -27,12 +27,17 @@ pub struct DetectedEngine {
 }
 
 /// Known engine binaries and their default ports.
-const ENGINE_BINARIES: &[(&str, EngineType, &str)] =
-    &[("vllm", EngineType::Vllm, "http://localhost:8000")];
+const ENGINE_BINARIES: &[(&str, EngineType, &str)] = &[
+    ("vllm", EngineType::Vllm, "http://localhost:8000"),
+    ("llama-server", EngineType::Llama, "http://localhost:8080"),
+];
 
 /// The port vLLM serves on when it is not told otherwise. Used wherever a
 /// candidate is found but its port cannot be read off the command line.
 const VLLM_DEFAULT_PORT: u16 = 8000;
+
+/// The port llama-server serves on when it is not told otherwise.
+const LLAMA_DEFAULT_PORT: u16 = 8080;
 
 // ---------------------------------------------------------------------------
 // Public detection entry point
@@ -124,23 +129,42 @@ fn is_vllm_process(command: &str) -> bool {
         .any(|arg| arg == "vllm" || arg.ends_with("/vllm") || arg.contains("vllm.entrypoints"))
 }
 
-/// The endpoint to probe a container's vLLM on, and whether the port had to be
-/// assumed.
+/// Whether a process command line is a llama.cpp server rather than something
+/// that merely serves a model whose name contains "llama".
 ///
-/// No port anywhere — no published binding, no `--port` in the command, none in
-/// the container's process list — means vLLM is on its own default. That is the
-/// normal shape of a host-networked container: it publishes nothing, because it
-/// is already on the host's ports.
+/// Only the binary itself counts: `llama-cli --model llama-3.gguf`, an
+/// `ollama run llama3` session, or a volume mount at `/models/llama` must not
+/// register as an engine.
+#[cfg(any(target_os = "linux", test))]
+fn is_llama_server_process(command: &str) -> bool {
+    command
+        .split_whitespace()
+        .any(|arg| arg == "llama-server" || arg.ends_with("/llama-server"))
+}
+
+/// The endpoint to probe a container's engine on, and whether the port had to
+/// be assumed.
 ///
-/// Assuming is safe and dropping the container is not. The health probe rejects
-/// a candidate whose `/health` does not answer, so a wrong assumption costs one
-/// request and corrects itself — while a container dropped for having no
-/// readable port is invisible to the dashboard for good, engine, metrics and
-/// logs alike.
-fn docker_endpoint(port: Option<&str>) -> (String, bool) {
+/// No port anywhere — no published binding, no `--port` in the command, none
+/// in the container's process list — means the engine is on its own default.
+/// That is the normal shape of a host-networked container: it publishes
+/// nothing, because it is already on the host's ports.
+///
+/// Assuming is safe and dropping the container is not. The health probe
+/// rejects a candidate whose `/health` does not answer, so a wrong assumption
+/// costs one request and corrects itself — while a container dropped for
+/// having no readable port is invisible to the dashboard for good, engine,
+/// metrics and logs alike.
+fn docker_endpoint(port: Option<&str>, engine_type: &EngineType) -> (String, bool) {
     match port {
         Some(p) => (format!("http://localhost:{}", p), false),
-        None => (format!("http://localhost:{}", VLLM_DEFAULT_PORT), true),
+        None => {
+            let default = match engine_type {
+                EngineType::Vllm => VLLM_DEFAULT_PORT,
+                EngineType::Llama => LLAMA_DEFAULT_PORT,
+            };
+            (format!("http://localhost:{}", default), true)
+        }
     }
 }
 
@@ -152,13 +176,16 @@ fn detect_by_process(sys: &sysinfo::System) -> Vec<DetectedEngine> {
     let mut detected: Vec<DetectedEngine> = Vec::new();
 
     for &(binary, ref engine_type, default_endpoint) in ENGINE_BINARIES {
-        // Direct binary match (e.g. process named "vllm")
+        // Direct binary match (e.g. process named "vllm" or "llama-server")
         let mut procs: Vec<_> = sys.processes_by_name(OsStr::new(binary)).collect();
 
-        // Also check all processes for vllm in their command-line args.
+        // vLLM alone can also be launched through entrypoints whose process
+        // name is not `vllm`; llama-server is always the compiled binary
+        // itself, so the argument scan is vLLM's fallback only — running it
+        // under the llama-server entry would tag vLLM processes as llama.cpp.
         // Covers: `python3 /usr/local/bin/vllm serve ...`  (Docker host-networking)
         //         `python -m vllm.entrypoints.openai.api_server ...`
-        if procs.is_empty() {
+        if procs.is_empty() && binary == "vllm" {
             let vllm_procs: Vec<_> = sys
                 .processes()
                 .values()
@@ -187,7 +214,12 @@ fn detect_by_process(sys: &sysinfo::System) -> Vec<DetectedEngine> {
             }
             let endpoint = parse_endpoint_from_args(p.cmd(), default_endpoint)
                 .unwrap_or_else(|| default_endpoint.to_string());
-            let served_model = parse_model_from_args(p.cmd());
+            let mut served_model = parse_model_from_args(p.cmd());
+            // llama-server's canonical short form is `-m <gguf>`; only honored
+            // for llama engines (see `parse_llama_model_from_args`).
+            if served_model.is_none() && *engine_type == EngineType::Llama {
+                served_model = parse_llama_model_from_args(p.cmd());
+            }
             let pid = p.pid().as_u32();
             match seen_endpoints.get(&endpoint) {
                 Some(&slot) => detected[slot].pids.push(pid),
@@ -289,7 +321,10 @@ fn parse_endpoint_from_args(args: &[OsString], default_endpoint: &str) -> Option
         let h = host.unwrap_or("localhost");
         // Treat 0.0.0.0 as localhost for probing purposes
         let h = if h == "0.0.0.0" { "localhost" } else { h };
-        let p = port.unwrap_or("8000");
+        // Each engine has its own default port, so the fallback has to come
+        // from the engine's default endpoint rather than a hard-coded vLLM
+        // port — `llama-server --host 0.0.0.0` serves on 8080, not 8000.
+        let p = port.unwrap_or_else(|| default_endpoint.rsplit(':').next().unwrap_or("8000"));
         Some(format!("http://{}:{}", h, p))
     } else {
         Some(default_endpoint.to_string())
@@ -404,6 +439,58 @@ fn parse_model_from_command_str(cmd: &str) -> Option<String> {
     None
 }
 
+/// The `-m <path>` / `-m=<path>` short form `llama-server` accepts for its
+/// model file. Recognized for llama.cpp engines only: vLLM launch lines
+/// contain `python -m vllm.entrypoints...` where `-m` introduces a Python
+/// module, not a model, so honoring it unconditionally would mislabel vLLM
+/// engines' fallback model.
+fn parse_llama_model_from_args(args: &[OsString]) -> Option<String> {
+    let args: Vec<String> = args
+        .iter()
+        .filter_map(|a| a.to_str().map(String::from))
+        .collect();
+    for (i, arg) in args.iter().enumerate() {
+        if *arg == "-m" {
+            if let Some(val) = args.get(i + 1) {
+                if !val.is_empty() && !val.starts_with('-') {
+                    return Some(val.clone());
+                }
+            }
+        } else if let Some(val) = arg.strip_prefix("-m=") {
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// String form of [`parse_llama_model_from_args`] for Docker command strings
+/// and `docker top` rows. Requires the line to name `llama-server`, since a
+/// `docker top` row from an unrelated sidecar in the same container could
+/// carry a `python -m <module>` line that is not a model file.
+#[cfg(any(target_os = "linux", test))]
+fn parse_llama_model_from_command_str(cmd: &str) -> Option<String> {
+    if !cmd.contains("llama-server") {
+        return None;
+    }
+    let parts: Vec<&str> = cmd.split_whitespace().collect();
+    for (i, part) in parts.iter().enumerate() {
+        if *part == "-m" {
+            if let Some(val) = parts.get(i + 1) {
+                if !val.is_empty() && !val.starts_with('-') {
+                    return Some((*val).to_string());
+                }
+            }
+        } else if let Some(val) = part.strip_prefix("-m=") {
+            if !val.is_empty() {
+                return Some(val.to_string());
+            }
+        }
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Layer 2: Docker scan
 // ---------------------------------------------------------------------------
@@ -462,23 +549,38 @@ pub async fn detect_docker_engines() -> Vec<DetectedEngine> {
 
         // The image and the container's entrypoint are trustworthy signals on
         // their own. A container *name* is not: names are operator-chosen and
-        // commonly include "vllm" for unrelated sidecars (an OpenResty reverse
-        // proxy called "vllm-proxy"), so a name match is only a candidate —
-        // confirmed below by finding an actual vLLM process inside it.
+        // commonly include "vllm" or "llama" for unrelated sidecars (an
+        // OpenResty reverse proxy called "vllm-proxy"), so a name match is
+        // only a candidate — confirmed below by finding an actual engine
+        // process inside it.
         //
         // The name has to count for something, though: a container built from a
-        // private image, started with `sleep infinity` and given vLLM by hand is
-        // otherwise invisible to the dashboard entirely, however plainly it is
-        // named.
+        // private image, started with `sleep infinity` and given an engine by
+        // hand is otherwise invisible to the dashboard entirely, however
+        // plainly it is named.
+        //
+        // llama.cpp is matched on `llama.cpp` (the image) and `llama-server`
+        // (the binary) — deliberately never on bare "llama": model paths,
+        // repo names and container names all contain "llama" ("meta-llama",
+        // "llama3-server"), and matching that would flag unrelated containers.
         let named_vllm = container
             .names
             .as_deref()
             .unwrap_or_default()
             .iter()
             .any(|n| n.to_lowercase().contains("vllm"));
+        let named_llama = container
+            .names
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|n| {
+                n.to_lowercase().contains("llama.cpp") || n.to_lowercase().contains("llama-server")
+            });
         let is_vllm = image.contains("vllm") || command.contains("vllm");
+        let is_llama = image.contains("llama.cpp") || command.contains("llama-server");
 
-        if !is_vllm && !named_vllm {
+        if !is_vllm && !named_vllm && !is_llama && !named_llama {
             continue;
         }
 
@@ -491,7 +593,10 @@ pub async fn detect_docker_engines() -> Vec<DetectedEngine> {
         // 2. Try port + model from the container's own command string
         let container_cmd = container.command.as_deref().unwrap_or_default();
         let cmd_port = parse_port_from_command_str(container_cmd);
-        let cmd_model = parse_model_from_command_str(container_cmd);
+        let mut cmd_model = parse_model_from_command_str(container_cmd);
+        if cmd_model.is_none() && is_llama {
+            cmd_model = parse_llama_model_from_command_str(container_cmd);
+        }
 
         let port = mapped_port.map(|p| p.to_string()).or(cmd_port);
 
@@ -504,6 +609,7 @@ pub async fn detect_docker_engines() -> Vec<DetectedEngine> {
         //    *entrypoint* and often omits the child vllm-serve args.
         let mut pids: Vec<u32> = Vec::new();
         let mut saw_vllm_process = false;
+        let mut saw_llama_process = false;
         let (port, served_model) = {
             let container_id = container.id.as_deref().unwrap_or_default();
             if container_id.is_empty() {
@@ -522,6 +628,9 @@ pub async fn detect_docker_engines() -> Vec<DetectedEngine> {
                                 let line = row.join(" ");
                                 if is_vllm_process(&line) {
                                     saw_vllm_process = true;
+                                }
+                                if is_llama_server_process(&line) {
+                                    saw_llama_process = true;
                                 }
                                 if found_port.is_none() {
                                     if let Some(p) = parse_port_from_command_str(&line) {
@@ -543,6 +652,16 @@ pub async fn detect_docker_engines() -> Vec<DetectedEngine> {
                                         found_model = Some(m);
                                     }
                                 }
+                                if found_model.is_none() && is_llama {
+                                    if let Some(m) = parse_llama_model_from_command_str(&line) {
+                                        tracing::debug!(
+                                            "Docker top: found model (-m) {} in: {}",
+                                            m,
+                                            line
+                                        );
+                                        found_model = Some(m);
+                                    }
+                                }
                             }
                         }
                         (found_port, found_model)
@@ -557,42 +676,56 @@ pub async fn detect_docker_engines() -> Vec<DetectedEngine> {
         pids.sort_unstable();
         pids.dedup();
 
-        // A container that only matched by name has to prove itself. Nothing
-        // that merely calls itself vllm becomes an engine.
-        if !is_vllm && !saw_vllm_process {
-            tracing::debug!(
-                "Container named like vLLM (image={}) runs no vLLM process; skipping",
-                container.image.as_deref().unwrap_or("?"),
-            );
-            continue;
-        }
+        // One container can in principle serve both engines; each type is
+        // verified on its own evidence. A container that only matched by name
+        // has to prove itself for that type: nothing that merely calls itself
+        // an engine becomes one.
+        for (engine_type, image_matched, process_seen, name_matched) in [
+            (EngineType::Vllm, is_vllm, saw_vllm_process, named_vllm),
+            (EngineType::Llama, is_llama, saw_llama_process, named_llama),
+        ] {
+            if !image_matched && !name_matched {
+                continue;
+            }
+            if !image_matched && !process_seen {
+                tracing::debug!(
+                    "Container named like {} (image={}) runs no {} process; skipping",
+                    engine_type,
+                    container.image.as_deref().unwrap_or("?"),
+                    engine_type,
+                );
+                continue;
+            }
 
-        // No port anywhere — no published binding, no `--port` in the command,
-        // none in the container's process list — means vLLM is on its own
-        // default. That is the normal shape of a host-networked container: it
-        // publishes nothing, because it is already on the host's ports.
-        //
-        // Guessing is safe here and dropping the container is not. The health
-        // probe below rejects a candidate whose `/health` does not answer, so a
-        // wrong guess costs one request and corrects itself, while a container
-        // dropped for having no port is invisible to the dashboard for good —
-        // engine, metrics and logs alike.
-        let (endpoint, guessed) = docker_endpoint(port.as_deref());
-        tracing::debug!(
-            "Docker vLLM candidate: image={}, endpoint={}{}, model={:?}",
-            container.image.as_deref().unwrap_or("?"),
-            endpoint,
-            if guessed { " (default port)" } else { "" },
-            served_model,
-        );
-        detected.push(DetectedEngine {
-            engine_type: EngineType::Vllm,
-            endpoint,
-            deployment_mode: DeploymentMode::Docker,
-            served_model,
-            pids,
-            container_id: container.id.clone(),
-        });
+            // No port anywhere — no published binding, no `--port` in the
+            // command, none in the container's process list — means the
+            // engine is on its own default. That is the normal shape of a
+            // host-networked container: it publishes nothing, because it is
+            // already on the host's ports.
+            //
+            // Guessing is safe here and dropping the container is not. The
+            // health probe below rejects a candidate whose `/health` does not
+            // answer, so a wrong guess costs one request and corrects itself,
+            // while a container dropped for having no port is invisible to the
+            // dashboard for good — engine, metrics and logs alike.
+            let (endpoint, guessed) = docker_endpoint(port.as_deref(), &engine_type);
+            tracing::debug!(
+                "Docker {} candidate: image={}, endpoint={}{}, model={:?}",
+                engine_type,
+                container.image.as_deref().unwrap_or("?"),
+                endpoint,
+                if guessed { " (default port)" } else { "" },
+                served_model,
+            );
+            detected.push(DetectedEngine {
+                engine_type,
+                endpoint,
+                deployment_mode: DeploymentMode::Docker,
+                served_model: served_model.clone(),
+                pids: pids.clone(),
+                container_id: container.id.clone(),
+            });
+        }
     }
 
     detected
@@ -644,7 +777,8 @@ async fn probe_engine(client: &reqwest::Client, candidate: &DetectedEngine) -> b
     let timeout = Duration::from_secs(2);
 
     match candidate.engine_type {
-        EngineType::Vllm => {
+        // Both engines expose the same OpenAI-convention health endpoint.
+        EngineType::Vllm | EngineType::Llama => {
             // GET /health -- 200 = healthy
             client
                 .get(format!("{}/health", candidate.endpoint))
@@ -739,6 +873,50 @@ mod tests {
         assert_eq!(parse_model_from_command_str("sleep infinity"), None);
     }
 
+    #[test]
+    fn parses_llama_short_m_flag_and_equals_form() {
+        let args = to_args(&[
+            "llama-server",
+            "-m",
+            "/models/qwen2-7b.gguf",
+            "--port",
+            "8081",
+        ]);
+        assert_eq!(
+            parse_llama_model_from_args(&args).as_deref(),
+            Some("/models/qwen2-7b.gguf"),
+        );
+        let args = to_args(&["llama-server", "-m=/models/qwen2-7b.gguf"]);
+        assert_eq!(
+            parse_llama_model_from_args(&args).as_deref(),
+            Some("/models/qwen2-7b.gguf"),
+        );
+    }
+
+    #[test]
+    fn llama_m_flag_rejects_flag_values_and_missing_value() {
+        let args = to_args(&["llama-server", "-m", "--port"]);
+        assert_eq!(parse_llama_model_from_args(&args), None);
+        let args = to_args(&["llama-server", "-m"]);
+        assert_eq!(parse_llama_model_from_args(&args), None);
+        let args = to_args(&["llama-server", "-m="]);
+        assert_eq!(parse_llama_model_from_args(&args), None);
+    }
+
+    #[test]
+    fn command_str_parses_llama_m_flag() {
+        assert_eq!(
+            parse_llama_model_from_command_str("llama-server -m /models/qwen2-7b.gguf").as_deref(),
+            Some("/models/qwen2-7b.gguf"),
+        );
+        // `python -m` introduces a module, not a model file.
+        assert_eq!(
+            parse_llama_model_from_command_str("python -m vllm.entrypoints.openai.api_server",)
+                .as_deref(),
+            None,
+        );
+    }
+
     fn to_row(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
     }
@@ -816,9 +994,89 @@ mod tests {
     }
 
     #[test]
+    fn a_llama_server_process_is_recognized_in_its_launch_forms() {
+        assert!(is_llama_server_process(
+            "llama-server --model qwen.gguf --port 8081"
+        ));
+        assert!(is_llama_server_process(
+            "/opt/llama/llama-server -m /models/m.gguf"
+        ));
+    }
+
+    #[test]
+    fn a_process_serving_a_llama_named_model_is_not_a_server() {
+        // "llama" is the most overused word in model names — only the binary
+        // counts. A cli chat session, an ollama run, or a mounted volume at
+        // /models/llama must not register as an engine.
+        assert!(!is_llama_server_process(
+            "llama-cli --model /models/llama-3.gguf"
+        ));
+        assert!(!is_llama_server_process("ollama run llama3"));
+        assert!(!is_llama_server_process(
+            "bash -c 'cd /models/llama && ./run.sh'"
+        ));
+        assert!(!is_llama_server_process(
+            "llm-bench --model meta-llama/Llama-3.1-8B"
+        ));
+    }
+
+    #[test]
+    fn parses_llama_server_port_flag() {
+        let args = to_args(&["llama-server", "--model", "qwen.gguf", "--port", "8081"]);
+        assert_eq!(
+            parse_endpoint_from_args(&args, "http://localhost:8080"),
+            Some("http://localhost:8081".to_string())
+        );
+    }
+
+    #[test]
+    fn llama_server_with_host_only_uses_its_own_default_port() {
+        // `--host` without `--port` must fall back to llama-server's default
+        // (8080), not vLLM's — each engine carries its own default endpoint.
+        let args = to_args(&["llama-server", "--host", "0.0.0.0"]);
+        assert_eq!(
+            parse_endpoint_from_args(&args, "http://localhost:8080"),
+            Some("http://localhost:8080".to_string())
+        );
+    }
+
+    #[test]
+    fn llama_server_with_no_flags_falls_back_to_default_endpoint() {
+        let args = to_args(&["llama-server", "--model", "qwen.gguf"]);
+        assert_eq!(
+            parse_endpoint_from_args(&args, "http://localhost:8080"),
+            Some("http://localhost:8080".to_string())
+        );
+    }
+
+    #[test]
+    fn vllm_with_host_only_still_defaults_to_8000() {
+        let args = to_args(&["vllm", "serve", "--host", "0.0.0.0"]);
+        assert_eq!(
+            parse_endpoint_from_args(&args, "http://localhost:8000"),
+            Some("http://localhost:8000".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_llama_server_model_from_command_line() {
+        let args = to_args(&[
+            "llama-server",
+            "--model",
+            "/mnt/models/Qwen2.5-3B-Instruct-Q4_K_M.gguf",
+            "--port",
+            "8081",
+        ]);
+        assert_eq!(
+            parse_model_from_args(&args).as_deref(),
+            Some("/mnt/models/Qwen2.5-3B-Instruct-Q4_K_M.gguf")
+        );
+    }
+
+    #[test]
     fn docker_endpoint_uses_the_port_detection_found() {
         assert_eq!(
-            docker_endpoint(Some("8001")),
+            docker_endpoint(Some("8001"), &EngineType::Vllm),
             ("http://localhost:8001".to_string(), false)
         );
     }
@@ -830,8 +1088,18 @@ mod tests {
         // --port. Before this it was dropped from detection entirely, which
         // took its metrics and its logs with it.
         assert_eq!(
-            docker_endpoint(None),
+            docker_endpoint(None, &EngineType::Vllm),
             ("http://localhost:8000".to_string(), true)
+        );
+    }
+
+    #[test]
+    fn docker_endpoint_assumes_llamas_default_when_no_port_is_readable() {
+        // llama-server's default is 8080, not vLLM's 8000 — guessing the
+        // wrong engine's default would probe a dead port on every tick.
+        assert_eq!(
+            docker_endpoint(None, &EngineType::Llama),
+            ("http://localhost:8080".to_string(), true)
         );
     }
 
