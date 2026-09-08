@@ -166,8 +166,18 @@ export function formatGpuIndexes(indexes: number[]): string {
 export function engineDisplayName(engineType: EngineType): string {
   const names: Record<EngineType, string> = {
     Vllm: 'vLLM',
+    Llama: 'llama.cpp',
   }
   return names[engineType]
+}
+
+/** The engine's identity mark, by type. */
+export function engineTypeIcon(engineType: EngineType): string {
+  const icons: Record<EngineType, string> = {
+    Vllm: '/icons/vllm.svg',
+    Llama: '/icons/llamacpp.svg',
+  }
+  return icons[engineType]
 }
 
 /**

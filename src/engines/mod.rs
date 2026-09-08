@@ -1,5 +1,6 @@
 pub mod detector;
 pub mod histogram;
+pub mod llama;
 pub mod prometheus;
 pub mod vllm;
 pub mod warmup;
@@ -17,6 +18,10 @@ use tokio::sync::RwLock;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
 pub enum EngineType {
     Vllm,
+    /// llama.cpp's OpenAI-compatible server (`llama-server`). Metrics are only
+    /// available when it is started with `--metrics`; without that flag the
+    /// engine stays listed but its metrics read as `null`.
+    Llama,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq, Hash)]
@@ -29,6 +34,7 @@ impl std::fmt::Display for EngineType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EngineType::Vllm => write!(f, "vLLM"),
+            EngineType::Llama => write!(f, "llama.cpp"),
         }
     }
 }
@@ -190,7 +196,8 @@ pub struct EngineMetrics {
     pub tpot_buckets: Option<Vec<HistogramBucket>>,
     // --- Speculative decoding ---
     // These are populated only when the served model has speculative decoding
-    // configured (vLLM emits `vllm:spec_decode_*` only in that case). When the
+    // configured — each engine emits its spec-decoding counters only then
+    // (vLLM: `vllm:spec_decode_*`, llama.cpp: `llamacpp:spec_decode_*`). When the
     // metrics are absent all six fields are `None`, which the frontend uses to
     // hide the speculative-decoding section entirely.
     /// Cumulative speculatively-generated (draft) tokens. Raw lifetime counter,
@@ -505,6 +512,9 @@ pub fn create_adapter(
 ) -> Box<dyn EngineAdapter> {
     match engine_type {
         EngineType::Vllm => Box::new(vllm::VllmAdapter::new(
+            client, endpoint, model_hint, api_key,
+        )),
+        EngineType::Llama => Box::new(llama::LlamaAdapter::new(
             client, endpoint, model_hint, api_key,
         )),
     }

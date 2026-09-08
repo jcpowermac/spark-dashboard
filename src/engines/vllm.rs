@@ -305,7 +305,10 @@ impl VllmAdapter {
 ///   display name falls back to the containing directory instead of the hash.
 /// * Anything else — HF ids, custom serve names, plain paths — passes
 ///   through unchanged.
-fn normalize_model_id(id: &str) -> String {
+///
+/// Shared by the vLLM and llama.cpp adapters: both can be pointed at a local
+/// HuggingFace hub-cache checkout as their `--model`.
+pub(super) fn normalize_model_id(id: &str) -> String {
     if !id.contains('/') {
         return id.to_string();
     }
@@ -358,7 +361,10 @@ enum ModelsEndpointReply {
 /// lacks the engine's API key — the one failure an operator fixes on the
 /// dashboard's side (configure a provider API key), so it gets its own
 /// reason; everything else is generic unavailability.
-fn classify_models_error_status(status: u16) -> ModelMetadataError {
+///
+/// Shared by the vLLM and llama.cpp adapters: llama-server's `/v1/models` is
+/// equally gated by its `--api-key` flag.
+pub(super) fn classify_models_error_status(status: u16) -> ModelMetadataError {
     match status {
         401 | 403 => ModelMetadataError::AuthRequired,
         _ => ModelMetadataError::Unavailable,
@@ -399,15 +405,17 @@ fn resolve_model_name(
     }
 }
 
+/// OpenAI-compatible `/v1/models` response — the same shape both engines
+/// (vLLM and llama-server) answer with.
 #[derive(Deserialize)]
-struct OpenAIModelsResponse {
+pub(super) struct OpenAIModelsResponse {
     #[serde(default)]
-    data: Vec<OpenAIModel>,
+    pub(super) data: Vec<OpenAIModel>,
 }
 
 #[derive(Deserialize)]
-struct OpenAIModel {
-    id: String,
+pub(super) struct OpenAIModel {
+    pub(super) id: String,
 }
 
 /// Response shape for GET https://huggingface.co/api/models/{model_id}
@@ -1073,7 +1081,10 @@ impl EngineAdapter for VllmAdapter {
 /// drafted and never surfaces a negative rate from a malformed/reset counter.
 /// Used for both the lifetime TAR (absolute counters) and the live TAR
 /// (per-poll deltas).
-fn spec_acceptance_rate(accepted: Option<f64>, draft: Option<f64>) -> Option<f64> {
+///
+/// Shared by the vLLM and llama.cpp adapters, which expose the same
+/// draft/accepted/drafts counter triple.
+pub(super) fn spec_acceptance_rate(accepted: Option<f64>, draft: Option<f64>) -> Option<f64> {
     match (accepted, draft) {
         (Some(a), Some(d)) if d > 0.0 && a >= 0.0 => Some((a / d) * 100.0),
         _ => None,
@@ -1083,7 +1094,12 @@ fn spec_acceptance_rate(accepted: Option<f64>, draft: Option<f64>) -> Option<f64
 /// Mean acceptance length: accepted tokens per draft attempt (`accepted / drafts`).
 ///
 /// Returns `None` unless both counts are present and `drafts > 0`.
-fn spec_mean_acceptance_length(accepted: Option<f64>, drafts: Option<f64>) -> Option<f64> {
+///
+/// Shared by the vLLM and llama.cpp adapters.
+pub(super) fn spec_mean_acceptance_length(
+    accepted: Option<f64>,
+    drafts: Option<f64>,
+) -> Option<f64> {
     match (accepted, drafts) {
         (Some(a), Some(n)) if n > 0.0 => Some(a / n),
         _ => None,
