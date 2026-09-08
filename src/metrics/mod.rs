@@ -85,8 +85,6 @@ pub async fn metrics_collector(
             Vec::new()
         }
     };
-    let primary_device = devices.first().map(|(_, device)| device);
-
     // Fictive GPUs slot in after every device NVML reports (not just the
     // monitored ones), so their indices can never collide with real hardware.
     let simulated_base_index = nvml
@@ -137,7 +135,8 @@ pub async fn metrics_collector(
             timestamp_ms,
         ));
 
-        let memory_metrics = memory::collect_memory_metrics(primary_device);
+        let memory_metrics =
+            memory::collect_memory_metrics(devices.iter().map(|(_, device)| device).collect());
         if !memory_logged {
             tracing::info!(
                 kernel_total_bytes = memory_metrics.total_bytes,

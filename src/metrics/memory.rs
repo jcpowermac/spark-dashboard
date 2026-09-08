@@ -102,13 +102,28 @@ pub fn select_display_total(
     sys_total_bytes
 }
 
-/// Collect memory metrics from /proc/meminfo, and GPU VRAM from NVML when a
-/// device is available. Detects unified vs discrete memory topology by
-/// comparing NVML VRAM total to system RAM total.
+/// Sum per-device (total, used) VRAM readings. `None` when no device
+/// reported, so callers can distinguish "no NVML data" from "0 bytes".
+fn aggregate_vram(readings: &[(u64, u64)]) -> (Option<u64>, Option<u64>) {
+    if readings.is_empty() {
+        return (None, None);
+    }
+    let total = readings.iter().map(|(t, _)| t).sum();
+    let used = readings.iter().map(|(_, u)| u).sum();
+    (Some(total), Some(used))
+}
+
+/// Collect memory metrics from /proc/meminfo, and GPU VRAM from NVML when
+/// devices are available. VRAM total/used and the process-memory estimate
+/// aggregate across all devices; unified vs discrete topology is detected
+/// from the first device's own name and pool size, since summing multi-GPU
+/// VRAM could coincidentally match system RAM and trip the size heuristic.
 #[cfg(target_os = "linux")]
-pub fn collect_memory_metrics(device: Option<&nvml_wrapper::Device>) -> MemoryMetrics {
+pub fn collect_memory_metrics(devices: Vec<&nvml_wrapper::Device>) -> MemoryMetrics {
     use crate::metrics::gpu::nvml_optional;
     use procfs::Current;
+
+    let first = devices.first().copied();
 
     // Primary source: /proc/meminfo for system RAM
     let meminfo = procfs::Meminfo::current();
@@ -130,33 +145,45 @@ pub fn collect_memory_metrics(device: Option<&nvml_wrapper::Device>) -> MemoryMe
 
     // GPU VRAM total/used via NVML (accurate on discrete GPUs; on unified-memory
     // systems this reports the same pool as /proc/meminfo, and on GB10 it
-    // returns NotSupported entirely).
-    let (gpu_memory_total_bytes, gpu_memory_used_bytes) = device
-        .and_then(|d| nvml_optional(d.memory_info()))
-        .map(|info| (Some(info.total), Some(info.used)))
-        .unwrap_or((None, None));
+    // returns NotSupported entirely). Aggregated across all devices.
+    let readings: Vec<(u64, u64)> = devices
+        .iter()
+        .filter_map(|d| nvml_optional(d.memory_info()).map(|info| (info.total, info.used)))
+        .collect();
+    let (gpu_memory_total_bytes, gpu_memory_used_bytes) = aggregate_vram(&readings);
 
     // GPU name powers the unified-memory family check (Grace/GB10/Jetson/etc.)
     // when NVML's memory_info isn't available to do the size-comparison check.
-    let gpu_name = device.and_then(|d| nvml_optional(d.name()));
+    let gpu_name = first.and_then(|d| nvml_optional(d.name()));
 
-    // Estimate GPU memory from running compute processes (process-list sum).
-    // Retained because it's the only per-process breakdown signal we have —
-    // useful on unified-memory systems where memory_info mirrors /proc/meminfo.
-    let gpu_estimated_bytes = device.and_then(|d| {
-        nvml_optional(d.running_compute_processes()).map(|procs| {
-            procs
-                .iter()
-                .map(|p| match p.used_gpu_memory {
-                    nvml_wrapper::enums::device::UsedGpuMemory::Used(bytes) => bytes,
-                    nvml_wrapper::enums::device::UsedGpuMemory::Unavailable => 0,
-                })
-                .sum::<u64>()
-        })
-    });
+    // Unified detection compares one memory pool against system RAM, so it
+    // uses the first device's own reading, not the multi-GPU sum.
+    let first_pool_total = first
+        .and_then(|d| nvml_optional(d.memory_info()))
+        .map(|info| info.total);
 
-    let is_unified =
-        detect_unified_memory(gpu_name.as_deref(), gpu_memory_total_bytes, total_bytes);
+    // Estimate GPU memory from running compute processes (process-list sum
+    // across all devices). Retained because it's the only per-process
+    // breakdown signal we have — useful on unified-memory systems where
+    // memory_info mirrors /proc/meminfo.
+    let gpu_estimated_bytes = {
+        let mut total: Option<u64> = None;
+        for d in &devices {
+            if let Some(procs) = nvml_optional(d.running_compute_processes()) {
+                let dev_sum = procs
+                    .iter()
+                    .map(|p| match p.used_gpu_memory {
+                        nvml_wrapper::enums::device::UsedGpuMemory::Used(bytes) => bytes,
+                        nvml_wrapper::enums::device::UsedGpuMemory::Unavailable => 0,
+                    })
+                    .sum::<u64>();
+                *total.get_or_insert(0) += dev_sum;
+            }
+        }
+        total
+    };
+
+    let is_unified = detect_unified_memory(gpu_name.as_deref(), first_pool_total, total_bytes);
     let display_total_bytes = select_display_total(is_unified, gpu_memory_total_bytes, total_bytes);
 
     MemoryMetrics {
@@ -389,17 +416,32 @@ mod tests {
         assert_eq!(select_display_total(false, None, kernel), kernel);
     }
 
+    #[test]
+    fn aggregate_vram_empty_is_none() {
+        assert_eq!(aggregate_vram(&[]), (None, None));
+    }
+
+    #[test]
+    fn aggregate_vram_sums_all_devices() {
+        // Two 24 GB cards, 10 GB and 8 GB used.
+        let gb = 1024 * 1024 * 1024;
+        assert_eq!(
+            aggregate_vram(&[(24 * gb, 10 * gb), (24 * gb, 8 * gb)]),
+            (Some(48 * gb), Some(18 * gb)),
+        );
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
-    fn collect_memory_metrics_none_device_reads_meminfo() {
-        let metrics = collect_memory_metrics(None);
+    fn collect_memory_metrics_no_devices_reads_meminfo() {
+        let metrics = collect_memory_metrics(vec![]);
         // On Linux, /proc/meminfo should be available so total > 0
         assert!(metrics.total_bytes > 0);
         assert!(metrics.available_bytes > 0);
         assert!(metrics.gpu_estimated_bytes.is_none());
         assert!(metrics.gpu_memory_total_bytes.is_none());
         assert!(metrics.gpu_memory_used_bytes.is_none());
-        // Without a GPU device we cannot be on a unified-memory system
+        // Without GPU devices we cannot be on a unified-memory system
         assert!(!metrics.is_unified);
         // Without NVML we have to fall back to the kernel-visible total.
         assert_eq!(metrics.display_total_bytes, metrics.total_bytes);
