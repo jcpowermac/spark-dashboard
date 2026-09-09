@@ -182,7 +182,10 @@ mod linux {
     }
 
     fn install_unit() -> Result<()> {
-        fs::write(UNIT_PATH, UNIT_FILE)?;
+        // Drop supplementary groups this host does not have — systemd
+        // refuses to spawn a unit that names a missing group (216/GROUP).
+        let unit = super::filter_unit_groups(UNIT_FILE, group_exists);
+        fs::write(UNIT_PATH, unit)?;
         fs::set_permissions(UNIT_PATH, fs::Permissions::from_mode(0o644))?;
         println!("==> Wrote unit file {UNIT_PATH}");
         Ok(())
@@ -279,6 +282,27 @@ mod linux {
     }
 }
 
+/// Keep only the supplementary groups that exist on this host. systemd
+/// refuses to spawn a unit whose `SupplementaryGroups=` names a missing group
+/// (status 216/GROUP), and hosts without a Docker install have no `docker`
+/// group at all.
+fn filter_unit_groups(unit: &str, present: impl Fn(&str) -> bool) -> String {
+    unit.lines()
+        .map(|line| {
+            let Some(rest) = line.strip_prefix("SupplementaryGroups=") else {
+                return line.to_string();
+            };
+            let kept = rest
+                .split_whitespace()
+                .filter(|g| present(g))
+                .collect::<Vec<_>>()
+                .join(" ");
+            format!("SupplementaryGroups={kept}")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 /// Tests over the unit file as *text*, so they run on any host: the file is
 /// embedded into the binary above and shipped verbatim by `service install`,
 /// which makes its contents part of this module's behaviour rather than a
@@ -308,5 +332,26 @@ mod tests {
         // needed, and it would hand the service a path systemd neither creates
         // nor owns.
         assert_eq!(directive(UNIT, "ReadWritePaths"), None);
+    }
+
+    #[test]
+    fn supplementary_groups_missing_on_the_host_are_dropped() {
+        let unit = "SupplementaryGroups=video render docker\n";
+        assert_eq!(
+            super::filter_unit_groups(unit, |g| g != "docker"),
+            "SupplementaryGroups=video render"
+        );
+        // A list that is entirely absent becomes an empty (reset) value, not
+        // a removed line — systemd accepts `SupplementaryGroups=` as "none".
+        assert_eq!(
+            super::filter_unit_groups(unit, |_| false),
+            "SupplementaryGroups="
+        );
+        // Untouched lines survive verbatim.
+        let whole = "[Service]\nUser=spark-dashboard\nSupplementaryGroups=video docker\n";
+        assert_eq!(
+            super::filter_unit_groups(whole, |g| g == "video"),
+            "[Service]\nUser=spark-dashboard\nSupplementaryGroups=video"
+        );
     }
 }
