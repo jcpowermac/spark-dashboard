@@ -214,6 +214,14 @@ pub struct EngineMetrics {
     pub spec_decode_acceptance_rate_live: Option<f64>,
     /// Mean accepted tokens per draft attempt: accepted/drafts (acceptance length).
     pub spec_decode_mean_acceptance_length: Option<f64>,
+    /// Cumulative accepted tokens per draft position, indexed by position
+    /// (llama.cpp `spec_decode_num_accepted_tokens_per_pos_total`). `None`
+    /// when the engine does not expose the per-position counter.
+    pub spec_decode_accepted_tokens_per_pos: Option<Vec<u64>>,
+    /// Cumulative `llama_decode()` calls (llama.cpp `n_decode_total`).
+    pub total_decode_calls: Option<u64>,
+    /// Largest observed sequence length in tokens (llama.cpp `n_tokens_max`).
+    pub max_sequence_tokens: Option<u64>,
     /// True while the engine is still in warmup — histogram-derived fields
     /// (averages, percentiles, goodput, rates) are intentionally `None` so the
     /// first slow inference does not pollute steady-state metrics. See

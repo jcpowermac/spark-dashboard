@@ -1069,6 +1069,11 @@ impl EngineAdapter for VllmAdapter {
                 spec_decode_acceptance_rate_live
             },
             spec_decode_mean_acceptance_length,
+            // vLLM exposes no per-position acceptance, decode-call, or
+            // max-sequence-length counters.
+            spec_decode_accepted_tokens_per_pos: None,
+            total_decode_calls: None,
+            max_sequence_tokens: None,
             warming_up,
         })
     }

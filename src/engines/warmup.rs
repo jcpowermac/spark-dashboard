@@ -182,6 +182,7 @@ fn clone_passthrough(parsed: &ParsedMetrics) -> ParsedMetrics {
         gauges: parsed.gauges.clone(),
         counters: parsed.counters.clone(),
         histograms: parsed.histograms.clone(),
+        labeled_counters: parsed.labeled_counters.clone(),
     }
 }
 
@@ -245,6 +246,7 @@ fn subtract_baseline(parsed: &ParsedMetrics, baseline: &HistogramBaseline) -> Pa
         gauges: parsed.gauges.clone(),
         counters,
         histograms,
+        labeled_counters: parsed.labeled_counters.clone(),
     }
 }
 
@@ -281,6 +283,7 @@ mod tests {
                 .map(|(k, v)| ((*k).to_string(), v.to_vec()))
                 .collect(),
             gauges: gauges.iter().map(|(k, v)| ((*k).to_string(), *v)).collect(),
+            labeled_counters: HashMap::new(),
         }
     }
 

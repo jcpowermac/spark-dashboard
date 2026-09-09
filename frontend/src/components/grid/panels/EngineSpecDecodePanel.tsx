@@ -62,6 +62,7 @@ export function EngineSpecDecodePanel({ panel }: PanelContentProps) {
           meanAcceptanceLength={metric('spec_decode_mean_acceptance_length')}
           acceptedTokens={metric('spec_decode_accepted_tokens_total')}
           draftTokens={draftTokens}
+          acceptedTokensPerPos={metric('spec_decode_accepted_tokens_per_pos') ?? null}
         />
       }
     />

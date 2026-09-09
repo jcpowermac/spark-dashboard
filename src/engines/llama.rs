@@ -80,6 +80,13 @@ const SPEC_DECODE_DRAFT_TOKENS_TOTAL: &str = "llamacpp_spec_decode_num_draft_tok
 const SPEC_DECODE_ACCEPTED_TOKENS_TOTAL: &str = "llamacpp_spec_decode_num_accepted_tokens_total";
 /// Cumulative speculative-decoding draft attempts.
 const SPEC_DECODE_DRAFTS_TOTAL: &str = "llamacpp_spec_decode_num_drafts_total";
+/// Cumulative accepted tokens per draft position, labeled by `position`.
+const SPEC_DECODE_ACCEPTED_PER_POS_TOTAL: &str =
+    "llamacpp_spec_decode_num_accepted_tokens_per_pos_total";
+/// Cumulative number of llama_decode() calls.
+const N_DECODE_TOTAL: &str = "llamacpp_n_decode_total";
+/// Largest observed sequence length (prompt + generation).
+const N_TOKENS_MAX: &str = "llamacpp_n_tokens_max";
 
 /// Map one parsed `/metrics` scrape onto the shared `EngineMetrics`
 /// contract.
@@ -182,6 +189,36 @@ fn map_metrics(
             _ => (None, None),
         };
 
+    // Accepted tokens per draft position: the labeled counter is indexed
+    // by `position="N"`; gaps are zero-filled so the index stays positional.
+    let spec_decode_accepted_tokens_per_pos = {
+        let prefix = format!("{}{{", SPEC_DECODE_ACCEPTED_PER_POS_TOTAL);
+        let mut items = parsed
+            .labeled_counters
+            .iter()
+            .filter_map(|(key, value)| {
+                let pos = key
+                    .strip_prefix(&prefix)
+                    .and_then(|s| s.strip_suffix('}'))
+                    .and_then(|s| s.strip_prefix("position="))
+                    .map(|s| s.trim_matches('"'))
+                    .and_then(|s| s.parse::<usize>().ok())?;
+                Some((pos, *value))
+            })
+            .collect::<Vec<_>>();
+        if items.is_empty() {
+            None
+        } else {
+            items.sort_by_key(|(p, _)| *p);
+            let max = items.last().unwrap().0;
+            let mut per_pos = vec![0u64; max + 1];
+            for (p, v) in items {
+                per_pos[p] = v.max(0.0) as u64;
+            }
+            Some(per_pos)
+        }
+    };
+
     let kv_cache_percent = parsed
         .gauges
         .get(KV_CACHE_USAGE_RATIO)
@@ -239,6 +276,15 @@ fn map_metrics(
         spec_decode_acceptance_rate,
         spec_decode_acceptance_rate_live,
         spec_decode_mean_acceptance_length,
+        spec_decode_accepted_tokens_per_pos,
+        total_decode_calls: parsed
+            .counters
+            .get(N_DECODE_TOTAL)
+            .map(|&v| v.max(0.0) as u64),
+        max_sequence_tokens: parsed
+            .counters
+            .get(N_TOKENS_MAX)
+            .map(|&v| v.max(0.0) as u64),
         warming_up: false,
     };
 
@@ -567,6 +613,17 @@ llamacpp:spec_decode_num_accepted_tokens_total 800
 # HELP llamacpp:spec_decode_num_drafts_total Total speculative decoding drafts.
 # TYPE llamacpp:spec_decode_num_drafts_total counter
 llamacpp:spec_decode_num_drafts_total 200
+# HELP llamacpp:n_decode_total Total number of llama_decode() calls.
+# TYPE llamacpp:n_decode_total counter
+llamacpp:n_decode_total 543
+# HELP llamacpp:n_tokens_max Largest observed sequence length (prompt + generation).
+# TYPE llamacpp:n_tokens_max counter
+llamacpp:n_tokens_max 2048
+# HELP llamacpp:spec_decode_num_accepted_tokens_per_pos_total Accepted tokens per draft position.
+# TYPE llamacpp:spec_decode_num_accepted_tokens_per_pos_total counter
+llamacpp:spec_decode_num_accepted_tokens_per_pos_total{position=\"0\"} 800
+llamacpp:spec_decode_num_accepted_tokens_per_pos_total{position=\"1\"} 400
+llamacpp:spec_decode_num_accepted_tokens_per_pos_total{position=\"2\"} 120
 ";
 
     fn parse(body: &str) -> ParsedMetrics {
@@ -620,6 +677,16 @@ llamacpp:spec_decode_num_drafts_total 200
         );
         assert_eq!(m.spec_decode_mean_acceptance_length, Some(4.0));
         assert_eq!(next, Some((800.0, 1000.0)));
+
+        // Decode-call counter, largest observed sequence length, and the
+        // per-draft-position accepted-token distribution (indexed by
+        // position).
+        assert_eq!(m.total_decode_calls, Some(543));
+        assert_eq!(m.max_sequence_tokens, Some(2048));
+        assert_eq!(
+            m.spec_decode_accepted_tokens_per_pos.as_deref(),
+            Some([800, 400, 120].as_slice())
+        );
 
         // No warmup machinery applies — llama.cpp has no per-request
         // histograms to screen.
@@ -696,6 +763,27 @@ llamacpp:prompt_tokens_total 100
         );
         assert_eq!(m.prefix_cache_hit_rate, None);
         assert_eq!(m.prefix_cache_queries_total, None);
+    }
+
+    #[test]
+    fn per_position_acceptance_stays_blank_without_the_labeled_counter() {
+        // Releases without the per-position counter, and scrapes where
+        // speculative decoding never ran, must leave the vector absent.
+        let (m, _) = map_metrics(
+            &parse(
+                "
+# HELP llamacpp:tokens_predicted_total Total predicted tokens.
+# TYPE llamacpp:tokens_predicted_total counter
+llamacpp:tokens_predicted_total 42
+",
+            ),
+            None,
+            &mut (0.0, 0),
+            &mut (0.0, 0),
+        );
+        assert!(m.spec_decode_accepted_tokens_per_pos.is_none());
+        assert_eq!(m.total_decode_calls, None);
+        assert_eq!(m.max_sequence_tokens, None);
     }
 
     #[test]

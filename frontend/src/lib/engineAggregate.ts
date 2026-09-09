@@ -37,6 +37,12 @@ export interface AggregateSnapshot {
   spec_decode_acceptance_rate: number | null
   spec_decode_acceptance_rate_live: number | null
   spec_decode_mean_acceptance_length: number | null
+  // llama.cpp-only. Per-position vectors sum per element (shorter vectors
+  // contribute zero to their missing tail); decode calls sum; max sequence
+  // length stays a max.
+  spec_decode_accepted_tokens_per_pos: number[] | null
+  total_decode_calls: number | null
+  max_sequence_tokens: number | null
 
   // Weighted mean by total_requests (simple mean fallback)
   ttft_ms: number | null
@@ -79,6 +85,25 @@ function meanOrNull(values: Array<number | null | undefined>): number | null {
   const present = values.filter((v): v is number => v !== null && v !== undefined)
   if (present.length === 0) return null
   return present.reduce((acc, v) => acc + v, 0) / present.length
+}
+
+function maxOrNull(values: Array<number | null | undefined>): number | null {
+  const present = values.filter((v): v is number => v !== null && v !== undefined)
+  if (present.length === 0) return null
+  return Math.max(...present)
+}
+
+/** Element-wise sum of the vectors that are present; missing positions
+ *  contribute zero so indices stay aligned across engines. */
+function sumVectors(
+  vectors: Array<number[] | null | undefined>,
+): number[] | null {
+  const present = vectors.filter((v): v is number[] => v !== null && v !== undefined)
+  if (present.length === 0) return null
+  const len = Math.max(...present.map((v) => v.length))
+  const out = new Array<number>(len).fill(0)
+  for (const v of present) for (let i = 0; i < v.length; i++) out[i] += v[i]
+  return out
 }
 
 interface Weighted {
@@ -137,6 +162,9 @@ function emptySnapshot(totalCount: number): AggregateSnapshot {
     spec_decode_acceptance_rate: null,
     spec_decode_acceptance_rate_live: null,
     spec_decode_mean_acceptance_length: null,
+    spec_decode_accepted_tokens_per_pos: null,
+    total_decode_calls: null,
+    max_sequence_tokens: null,
     ttft_ms: null,
     e2e_latency_ms: null,
     queue_time_ms: null,
@@ -272,6 +300,7 @@ export function aggregateEngines(engines: readonly EngineSnapshot[]): AggregateS
   const specDrafts = sumOrNull(get('spec_decode_drafts_total'))
   const ratio = (num: number | null, den: number | null, scale = 1): number | null =>
     num !== null && den !== null && den > 0 ? (num / den) * scale : null
+  const specPerPos = sumVectors(metrics.map((m) => m?.spec_decode_accepted_tokens_per_pos ?? null))
 
   return {
     running_count: running.length,
@@ -310,6 +339,9 @@ export function aggregateEngines(engines: readonly EngineSnapshot[]): AggregateS
       })),
     ),
     spec_decode_mean_acceptance_length: ratio(specAcceptedTokens, specDrafts),
+    spec_decode_accepted_tokens_per_pos: specPerPos,
+    total_decode_calls: sumOrNull(get('total_decode_calls')),
+    max_sequence_tokens: maxOrNull(get('max_sequence_tokens')),
 
     // Weighted mean
     ttft_ms: weightedBy('ttft_ms'),
@@ -411,5 +443,8 @@ export function aggregateEngineMetrics(engines: readonly EngineSnapshot[]): Engi
     spec_decode_acceptance_rate: aggregate.spec_decode_acceptance_rate,
     spec_decode_acceptance_rate_live: aggregate.spec_decode_acceptance_rate_live,
     spec_decode_mean_acceptance_length: aggregate.spec_decode_mean_acceptance_length,
+    spec_decode_accepted_tokens_per_pos: aggregate.spec_decode_accepted_tokens_per_pos,
+    total_decode_calls: aggregate.total_decode_calls,
+    max_sequence_tokens: aggregate.max_sequence_tokens,
   }
 }

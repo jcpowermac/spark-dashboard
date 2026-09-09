@@ -9,6 +9,10 @@ pub struct ParsedMetrics {
     /// `_bucket` suffix). Each entry is a list of `(le, cumulative_count)`
     /// pairs sorted ascending by `le`, including the `+Inf` bucket if present.
     pub histograms: HashMap<String, Vec<(f64, f64)>>,
+    /// Labeled counters, keyed by `name{label="value",...}`. Labeled
+    /// samples also land in `counters` (last label set wins) so existing
+    /// consumers are unaffected; this map preserves each label set.
+    pub labeled_counters: HashMap<String, f64>,
 }
 
 /// Parse a Prometheus text exposition format body into typed metrics.
@@ -39,6 +43,7 @@ pub fn parse_prometheus_text(body: &str) -> Option<ParsedMetrics> {
     let mut gauges = HashMap::new();
     let mut counters = HashMap::new();
     let mut histograms: HashMap<String, Vec<(f64, f64)>> = HashMap::new();
+    let mut labeled_counters: HashMap<String, f64> = HashMap::new();
 
     for sample in &scrape.samples {
         match &sample.value {
@@ -47,6 +52,17 @@ pub fn parse_prometheus_text(body: &str) -> Option<ParsedMetrics> {
             }
             prometheus_parse::Value::Counter(v) => {
                 counters.insert(sample.metric.clone(), *v);
+                if !sample.labels.is_empty() {
+                    // `name{label="value",...}` — preserves the label order
+                    // of the exposition, so each label set keeps its own key.
+                    let inner = sample
+                        .labels
+                        .iter()
+                        .map(|(name, value)| format!("{}=\"{}\"", name, value))
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    labeled_counters.insert(format!("{}{{{}}}", sample.metric, inner), *v);
+                }
             }
             prometheus_parse::Value::Histogram(buckets) => {
                 // `prometheus-parse` aggregates `_bucket` lines into a single
@@ -82,6 +98,7 @@ pub fn parse_prometheus_text(body: &str) -> Option<ParsedMetrics> {
         gauges,
         counters,
         histograms,
+        labeled_counters,
     })
 }
 
@@ -218,6 +235,32 @@ llamacpp:spec_decode_num_draft_tokens_total 1000
             Some(&3.0)
         );
         assert!(parsed.histograms.is_empty());
+    }
+
+    /// Labeled counters (e.g. llama.cpp's per-draft-position acceptance
+    /// counters) must keep their label set in the key — collapsing them onto
+    /// the bare name would make every position overwrite the previous one.
+    #[test]
+    fn captures_labeled_counters_with_their_label_set() {
+        let body = "\
+# HELP llamacpp:spec_decode_num_accepted_tokens_per_pos_total Accepted tokens per draft position.
+# TYPE llamacpp:spec_decode_num_accepted_tokens_per_pos_total counter
+llamacpp:spec_decode_num_accepted_tokens_per_pos_total{position=\"0\"} 800
+llamacpp:spec_decode_num_accepted_tokens_per_pos_total{position=\"1\"} 400
+";
+        let parsed = parse_prometheus_text(body).expect("parse");
+        assert_eq!(
+            parsed
+                .labeled_counters
+                .get("llamacpp_spec_decode_num_accepted_tokens_per_pos_total{position=\"0\"}"),
+            Some(&800.0)
+        );
+        assert_eq!(
+            parsed
+                .labeled_counters
+                .get("llamacpp_spec_decode_num_accepted_tokens_per_pos_total{position=\"1\"}"),
+            Some(&400.0)
+        );
     }
 
     #[test]

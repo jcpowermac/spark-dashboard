@@ -137,6 +137,9 @@ interface SpecDecodeSectionProps {
   acceptedTokens: number | null
   /** Cumulative drafted tokens (counts up). */
   draftTokens: number | null
+  /** Accepted tokens per draft position, indexed by position (llama.cpp
+   *  only). Rendered as a small bar strip when present. */
+  acceptedTokensPerPos?: number[] | null
 }
 
 /**
@@ -153,7 +156,13 @@ export function SpecDecodeSection({
   meanAcceptanceLength,
   acceptedTokens,
   draftTokens,
+  acceptedTokensPerPos,
 }: SpecDecodeSectionProps) {
+  // The per-position strip scales each bar against the busiest position;
+  // an 8% floor keeps the tail of the distribution visible.
+  const perPosMax = acceptedTokensPerPos
+    ? Math.max(...acceptedTokensPerPos)
+    : 0
   const tarColor =
     acceptanceRate === null
       ? 'text-zinc-100'
@@ -223,6 +232,25 @@ export function SpecDecodeSection({
           </div>
         </div>
       </div>
+      {acceptedTokensPerPos && acceptedTokensPerPos.length > 0 && (
+        <div className="flex flex-col gap-0.5 mt-1.5 min-w-0">
+          <span className="text-[10px] font-medium text-zinc-400 uppercase tracking-wider truncate">
+            Per-Pos
+          </span>
+          <div className="flex items-end gap-px h-4">
+            {acceptedTokensPerPos.map((value, i) => (
+              <div
+                key={i}
+                title={`pos ${i}: ${value}`}
+                className="flex-1 rounded-[1px] bg-zinc-500/70 min-w-0"
+                style={{
+                  height: `${perPosMax > 0 ? Math.max(8, (value / perPosMax) * 100) : 0}%`,
+                }}
+              />
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

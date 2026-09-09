@@ -199,6 +199,14 @@ export interface EngineMetrics {
   spec_decode_acceptance_rate_live: number | null
   /** Mean accepted tokens per draft attempt: accepted/drafts. */
   spec_decode_mean_acceptance_length: number | null
+  // llama.cpp-only: optional so snapshots from engines (or older backends)
+  // that do not expose these counters still parse.
+  /** Cumulative accepted tokens per draft position, indexed by position. */
+  spec_decode_accepted_tokens_per_pos?: number[] | null
+  /** Cumulative llama_decode() calls. */
+  total_decode_calls?: number | null
+  /** Largest observed sequence length in tokens. */
+  max_sequence_tokens?: number | null
 }
 
 export interface EngineSnapshot {

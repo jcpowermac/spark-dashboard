@@ -284,6 +284,44 @@ describe('aggregateEngines', () => {
     expect(snap.total_count).toBe(2)
     expect(snap.tokens_per_sec).toBeNull()
   })
+
+  it('sums decode-call counters and per-position acceptance across engines', () => {
+    const engines = [
+      engine('Running', fullMetrics({
+        total_decode_calls: 500,
+        spec_decode_accepted_tokens_per_pos: [800, 400, 120],
+      })),
+      engine('Running', fullMetrics({
+        total_decode_calls: 300,
+        spec_decode_accepted_tokens_per_pos: [100, 50],
+      })),
+    ]
+    const snap = aggregateEngines(engines)
+    expect(snap.total_decode_calls).toBe(800)
+    // Per-position sum; a shorter vector contributes zero to its missing
+    // tail, so positions stay aligned across engines.
+    expect(snap.spec_decode_accepted_tokens_per_pos).toEqual([900, 450, 120])
+    // The same vector survives the EngineMetrics reshape.
+    expect(aggregateEngineMetrics(engines)?.spec_decode_accepted_tokens_per_pos)
+      .toEqual([900, 450, 120])
+  })
+
+  it('keeps max sequence length as a max, not a sum', () => {
+    const engines = [
+      engine('Running', fullMetrics({ max_sequence_tokens: 1024 })),
+      engine('Running', fullMetrics({ max_sequence_tokens: 4096 })),
+    ]
+    const snap = aggregateEngines(engines)
+    expect(snap.max_sequence_tokens).toBe(4096)
+  })
+
+  it('leaves the llama.cpp-only fields null when no engine reports them', () => {
+    const snap = aggregateEngines([engine('Running')])
+    expect(snap.total_decode_calls).toBeNull()
+    expect(snap.max_sequence_tokens).toBeNull()
+    expect(snap.spec_decode_accepted_tokens_per_pos).toBeNull()
+    expect(aggregateEngineMetrics([engine('Running')])?.max_sequence_tokens).toBeNull()
+  })
 })
 
 function engineWithModel(
