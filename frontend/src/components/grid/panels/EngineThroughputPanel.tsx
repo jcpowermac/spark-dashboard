@@ -1,7 +1,7 @@
 import { TimeSeriesChart } from '@/components/charts/TimeSeriesChart'
 import { LiveWithTotal, MetricTile } from '@/components/engines/EnginePanelPrimitives'
 import { computeTrend } from '@/lib/engineStats'
-import { formatTps, fmtVal } from '@/lib/format'
+import { formatCompactTokens, formatTps, fmtVal } from '@/lib/format'
 import type { NumericEngineMetric } from '@/lib/engineMetrics'
 import type { EngineSeriesName } from '@/lib/metricsHistoryStore'
 import { EnginePanelBody } from './EnginePanelBody'
@@ -24,6 +24,9 @@ interface ThroughputFields {
   /** What the cumulative total counts, as the tile labels it. */
   totalLabel: string
   series: { live: EngineSeriesName; average: EngineSeriesName; perRequest: EngineSeriesName }
+  /** Optional extra lifetime counter tile beneath the standard three — the
+   *  decode panel carries llama.cpp's cumulative decode-call count. */
+  extra?: { label: string; key: 'total_decode_calls' }
 }
 
 const PREFILL: ThroughputFields = {
@@ -42,6 +45,7 @@ const DECODE: ThroughputFields = {
   total: 'total_generation_tokens',
   totalLabel: 'Generated',
   series: { live: 'tps', average: 'avgTps', perRequest: 'perReqTps' },
+  extra: { label: 'Decode Calls', key: 'total_decode_calls' },
 }
 
 /** Prompt processing: how fast the engine is reading its prompts. */
@@ -89,6 +93,13 @@ function ThroughputPanel({ panel, fields }: PanelContentProps & { fields: Throug
             unit="tok/s"
             trend={computeTrend(perRequest)}
           />
+          {fields.extra && (
+            <MetricTile
+              label={fields.extra.label}
+              value={formatCompactTokens(metric(fields.extra.key) ?? null)}
+              unit="calls"
+            />
+          )}
         </div>
       }
       chart={

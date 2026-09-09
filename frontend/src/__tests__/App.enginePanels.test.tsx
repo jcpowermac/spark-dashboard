@@ -74,6 +74,7 @@ function engineMetrics(overrides: Partial<EngineMetrics> = {}): EngineMetrics {
     preemptions_total: 0,
     total_prompt_tokens: 1_000_000,
     total_generation_tokens: 500_000,
+    total_decode_calls: 12_345,
     prefix_cache_queries_total: 2_000_000,
     avg_batch_size: 6.5,
     max_sequence_tokens: 8192,
@@ -240,6 +241,9 @@ describe('the engine panels on a grid page', () => {
     const decode = region('Decode Throughput')
     expect(within(decode).getByText('120.0')).toBeInTheDocument()
     expect(within(decode).getByText('Generated')).toBeInTheDocument()
+    // llama.cpp's cumulative llama_decode() call count, decode panel only.
+    expect(within(decode).getByText('Decode Calls')).toBeInTheDocument()
+    expect(within(decode).getByText('12.3K')).toBeInTheDocument()
 
     const latency = region('Latency')
     expect(within(latency).getByText('210')).toBeInTheDocument()
