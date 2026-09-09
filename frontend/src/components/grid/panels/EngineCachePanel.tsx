@@ -53,14 +53,23 @@ export function EngineCachePanel({ panel }: PanelContentProps) {
               unit="%"
             />
           </div>
-          <div className="flex flex-col gap-0.5 min-w-0">
-            <span className="text-[10px] 2xl:text-xs font-medium text-zinc-400 uppercase tracking-wider truncate">
-              Prefix Queries
-            </span>
-            <AnimatedCounter
-              value={metric('prefix_cache_queries_total')}
-              format={formatCompactTokens}
-              className="text-lg xl:text-xl 2xl:text-2xl min-[1920px]:text-3xl font-bold text-zinc-100 font-mono tabular-nums leading-none"
+          <div className="grid grid-cols-2 gap-1.5 min-w-0">
+            <div className="flex flex-col gap-0.5 min-w-0">
+              <span className="text-[10px] 2xl:text-xs font-medium text-zinc-400 uppercase tracking-wider truncate">
+                Prefix Queries
+              </span>
+              <AnimatedCounter
+                value={metric('prefix_cache_queries_total')}
+                format={formatCompactTokens}
+                className="text-lg xl:text-xl 2xl:text-2xl min-[1920px]:text-3xl font-bold text-zinc-100 font-mono tabular-nums leading-none"
+              />
+            </div>
+            {/* Largest sequence the engine has observed (prompt + generation).
+                Null on engines without the counter, e.g. vLLM. */}
+            <MetricTile
+              label="Max Seq"
+              value={formatCompactTokens(metric('max_sequence_tokens') ?? null)}
+              unit="tok"
             />
           </div>
         </div>

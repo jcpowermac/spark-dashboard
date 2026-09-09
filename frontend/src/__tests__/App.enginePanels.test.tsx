@@ -76,6 +76,7 @@ function engineMetrics(overrides: Partial<EngineMetrics> = {}): EngineMetrics {
     total_generation_tokens: 500_000,
     prefix_cache_queries_total: 2_000_000,
     avg_batch_size: 6.5,
+    max_sequence_tokens: 8192,
     ttft_percentiles: { p50_ms: 200, p95_ms: 400, p99_ms: 900 },
     itl_percentiles: null,
     e2e_percentiles: null,
@@ -266,6 +267,9 @@ describe('the engine panels on a grid page', () => {
     expect(within(cache).getByText('42')).toBeInTheDocument()
     expect(within(cache).getByText('55')).toBeInTheDocument()
     expect(within(cache).getByText('2M')).toBeInTheDocument()
+    // Largest observed sequence length, compact-formatted.
+    expect(within(cache).getByText('Max Seq')).toBeInTheDocument()
+    expect(within(cache).getByText('8.2K')).toBeInTheDocument()
 
     // This engine is not speculating, so the panel says so rather than
     // rendering a section of dashes.
